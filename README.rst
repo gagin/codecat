@@ -2,6 +2,8 @@
 README.rst
 ==========
 
+**This project has been abandoned, use https://github.com/yamadashy/repomix instead**
+
 codecat
 =======
 **Version:** 0.4.0
