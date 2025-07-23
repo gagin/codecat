@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -80,10 +81,28 @@ func contains(slice []string, item string) bool {
 	}
 	return false
 }
-func appendFileContent(builder *strings.Builder, marker, relPathCwd string, content []byte) {
-	slog.Debug("Adding file content to output.", "path", relPathCwd, "size", len(content))
-	builder.WriteString(fmt.Sprintf("%s %s\n%s%s\n",
-		marker, relPathCwd, string(content), marker))
+func appendFileContent(builder *strings.Builder, marker, relPathCwd string, content []byte, useLegacyFormat bool, xmlEscapeContent bool) {
+	slog.Debug("Adding file content to output.", "path", relPathCwd, "size", len(content), "legacy", useLegacyFormat, "escape", xmlEscapeContent)
+
+	if !useLegacyFormat { // XML Mode
+		builder.WriteString(fmt.Sprintf("  <file path=%q>\n", relPathCwd))
+		if xmlEscapeContent {
+			builder.WriteString("    ")
+			xml.Escape(builder, content)
+			builder.WriteString("\n")
+		} else {
+			// Use CDATA for unescaped content.
+			// Handle nested CDATA end markers `]]>` by replacing them with a safe sequence.
+			cdataContent := strings.ReplaceAll(string(content), "]]>", "]]]]><![CDATA[>")
+			builder.WriteString("    <![CDATA[")
+			builder.WriteString(cdataContent)
+			builder.WriteString("]]>\n")
+		}
+		builder.WriteString("  </file>\n")
+	} else { // Legacy Mode
+		builder.WriteString(fmt.Sprintf("%s %s\n%s%s\n",
+			marker, relPathCwd, string(content), marker))
+	}
 }
 func tern[T any](condition bool, trueVal, falseVal T) T {
 	if condition {

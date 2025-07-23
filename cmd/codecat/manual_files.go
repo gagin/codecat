@@ -2,7 +2,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,9 +14,6 @@ import (
 func processManualFiles(
 	cwd string,
 	manualFilePaths []string,
-	// --- Exclude patterns are no longer needed here ---
-	// basenameExcludes []string,
-	// cwdRelativeExcludePatterns []string,
 	marker string,
 	outputBuilder *strings.Builder,
 	processedAbsPaths map[string]bool, // Keep track of processed files
@@ -25,6 +21,8 @@ func processManualFiles(
 	emptyFiles *[]string, // Pointer to modify the slice
 	errorFiles map[string]error, // Modify directly
 	totalSize *int64, // Pointer to modify total size
+	useLegacyFormat bool,
+	xmlEscapeContent bool,
 ) {
 	if len(manualFilePaths) == 0 {
 		return // Nothing to do
@@ -59,26 +57,18 @@ func processManualFiles(
 		slog.Debug("Attempting to process manual file.", "raw", manualPathRaw,
 			"absolute", absManualPath, "relativeToCwd", relPathCwd)
 
-		// Stat the file
+		// Stat the file. Pre-flight checks should prevent "Not Found" or "Is Dir" errors,
+		// but we still handle errors for robustness (e.g., race conditions).
 		fileInfo, errStat := os.Stat(absManualPath)
 		if errStat != nil {
-			logMsg := "Cannot stat manual file."
-			if os.IsNotExist(errStat) {
-				logMsg = "Manual file not found."
-			}
-			slog.Warn(logMsg, "path", relPathCwd, "absolute", absManualPath, "error", errStat)
+			slog.Warn("Cannot stat manual file (should have been caught by pre-flight check).",
+				"path", relPathCwd, "absolute", absManualPath, "error", errStat)
 			errorFiles[relPathCwd] = errStat        // Record error
 			processedAbsPaths[absManualPath] = true // Mark as processed even on error
 			continue
 		}
 
-		// Skip directories specified via -f
-		if fileInfo.IsDir() {
-			slog.Warn("Manual path points to a directory, skipping.", "path", relPathCwd)
-			errorFiles[relPathCwd] = fmt.Errorf("path is a directory")
-			processedAbsPaths[absManualPath] = true
-			continue
-		}
+		// Directory check is now done in pre-flight checks.
 
 		// --- NO EXCLUSION CHECKS for -f files ---
 		slog.Debug("Including manual file (bypassing excludes).", "path", relPathCwd)
@@ -100,8 +90,8 @@ func processManualFiles(
 			continue
 		}
 
-		// Use the helper function (now in helpers.go) to append content
-		appendFileContent(outputBuilder, marker, relPathCwd, content)
+		// Use the helper function to append content
+		appendFileContent(outputBuilder, marker, relPathCwd, content, useLegacyFormat, xmlEscapeContent)
 
 		// Append to slices/maps via pointers or direct map access
 		*includedFiles = append(*includedFiles, FileInfo{

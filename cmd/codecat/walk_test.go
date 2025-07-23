@@ -95,7 +95,7 @@ func TestGenerateConcatenatedCode_BasicScan(t *testing.T) {
 
 	output, includedFiles, emptyFiles, errorFiles, _, err := generateConcatenatedCode(
 		tempDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err)
@@ -152,7 +152,7 @@ func TestGenerateConcatenatedCode_WithExcludesUnified(t *testing.T) {
 
 	output, includedFiles, _, _, _, err := generateConcatenatedCode(
 		tempDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err)
@@ -203,7 +203,7 @@ func TestGenerateConcatenatedCode_ProjectExcludes(t *testing.T) {
 
 	output, includedFiles, _, _, _, err := generateConcatenatedCode(
 		cwdDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err)
@@ -224,10 +224,61 @@ func TestGenerateConcatenatedCode_ProjectExcludes(t *testing.T) {
 	assertions.Contains(logOutput, `Excluding directory and its contents." path=exclude_dir_no_slash`)
 }
 
-// (Omitted other passing tests for brevity)
-// You can append the other test functions that were already passing here.
-// e.g., TestGenerateConcatenatedCode_WithManualFiles, TestGenerateConcatenatedCode_WithGitignore, etc.
-// passing below
+func TestGenerateConcatenatedCode_XMLOutput_CDATA(t *testing.T) {
+	assertions := assert.New(t)
+	structure := map[string]string{
+		"file1.txt": "Content with < & > and a CDATA end ]]> marker.",
+		"script.py": "print('hello')",
+	}
+	tempDir := setupTestDir(t, structure)
+	testLogger, _ := setupTestLogger(t)
+	slog.SetDefault(testLogger)
+
+	exts := processExtensions([]string{"py", "txt"})
+	header := "XML Test Header"
+
+	output, includedFiles, _, _, _, err := generateConcatenatedCode(
+		tempDir, []string{tempDir}, exts, []string{}, []string{},
+		[]string{}, []string{}, false, header, "---", false, false, false, // XML, no escape
+	)
+
+	assertions.NoError(err)
+	expectedHeader := "<description><![CDATA[XML Test Header]]></description>"
+	expectedFile1 := `<file path="file1.txt">
+    <![CDATA[Content with < & > and a CDATA end ]]]]><![CDATA[> marker.]]>
+  </file>`
+	expectedFile2 := `<file path="script.py">
+    <![CDATA[print('hello')]]>
+  </file>`
+
+	assertions.Contains(output, "<codebase>")
+	assertions.Contains(output, "</codebase>")
+	assertions.Contains(output, expectedHeader)
+	assertions.Contains(output, expectedFile1)
+	assertions.Contains(output, expectedFile2)
+	assertions.Len(includedFiles, 2)
+}
+
+func TestGenerateConcatenatedCode_XMLOutput_Escaped(t *testing.T) {
+	assertions := assert.New(t)
+	structure := map[string]string{
+		"file1.txt": "Content with < & >.",
+	}
+	tempDir := setupTestDir(t, structure)
+	exts := processExtensions([]string{"txt"})
+	header := "XML Escaped"
+
+	output, _, _, _, _, err := generateConcatenatedCode(
+		tempDir, []string{tempDir}, exts, []string{}, []string{},
+		[]string{}, []string{}, false, header, "---", false, false, true, // XML, with escape
+	)
+
+	assertions.NoError(err)
+	expectedFile1 := `<file path="file1.txt">
+    Content with < & >.
+  </file>`
+	assertions.Contains(output, expectedFile1)
+}
 
 // Test .gitignore integration
 func TestGenerateConcatenatedCode_WithGitignore(t *testing.T) {
@@ -257,7 +308,7 @@ func TestGenerateConcatenatedCode_WithGitignore(t *testing.T) {
 
 	output, includedFiles, _, _, _, err := generateConcatenatedCode(
 		tempDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err)
@@ -297,7 +348,7 @@ func TestGenerateConcatenatedCode_EmptyFiles(t *testing.T) {
 
 	output, includedFiles, emptyFiles, _, _, err := generateConcatenatedCode(
 		tempDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err)
@@ -348,7 +399,7 @@ func TestGenerateConcatenatedCode_ReadError(t *testing.T) {
 
 	output, includedFiles, _, errorFiles, _, err := generateConcatenatedCode(
 		tempDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err, "generateConcatenatedCode itself should succeed")
@@ -368,132 +419,6 @@ func TestGenerateConcatenatedCode_ReadError(t *testing.T) {
 	logOutput := logBuf.String()
 	t.Logf("Log output:\n%s", logOutput)
 	assertions.Contains(logOutput, "Error reading file content.", "path=unreadable.txt")
-}
-
-// Test scanning non-existent dir
-func TestGenerateConcatenatedCode_NonExistentScanDir(t *testing.T) {
-	assertions := assert.New(t)
-	cwdDir := t.TempDir()
-	nonExistentDir := filepath.Join(cwdDir, "nosuchdir")
-	testLogger, logBuf := setupTestLogger(t)
-	slog.SetDefault(testLogger)
-	exts := processExtensions([]string{"txt"})
-	manualFiles := []string{}
-	excludeBasenames := []string{}
-	projectExcludes := []string{}
-	flagExcludes := []string{}
-	useGitignore := false
-	header := "No Dir Test:"
-	marker := "---"
-	scanDirs := []string{nonExistentDir}
-	noScan := false
-
-	output, includedFiles, emptyFiles, errorFiles, totalSize, err := generateConcatenatedCode(
-		cwdDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
-	)
-
-	assertions.Error(err)
-	assertions.True(errors.Is(err, fs.ErrNotExist))
-	assertions.Contains(output, header)
-	assertions.Empty(includedFiles)
-	assertions.Empty(emptyFiles)
-	relNonExistent, _ := filepath.Rel(cwdDir, nonExistentDir)
-	relNonExistent = filepath.ToSlash(relNonExistent) + "/"
-	_, exists := errorFiles[relNonExistent]
-	assertions.True(exists)
-	assertions.Equal(int64(0), totalSize)
-	logOutput := logBuf.String()
-	t.Logf("Log output:\n%s", logOutput)
-	assertions.Contains(logOutput, "Target scan directory does not exist.")
-}
-
-// Test non-existent scan dir with manual files
-func TestGenerateConcatenatedCode_NonExistentScanDir_WithManualFile(t *testing.T) {
-	assertions := assert.New(t)
-	cwdDir := t.TempDir()
-	nonExistentDir := filepath.Join(cwdDir, "nosuchdir")
-	manualFilePath := filepath.Join(cwdDir, "manual.txt")
-	errWrite := os.WriteFile(manualFilePath, []byte("Manual content"), 0644)
-	require.NoError(t, errWrite)
-	testLogger, logBuf := setupTestLogger(t)
-	slog.SetDefault(testLogger)
-	exts := processExtensions([]string{"txt"})
-	manualFiles := []string{"manual.txt"}
-	excludeBasenames := []string{}
-	projectExcludes := []string{}
-	flagExcludes := []string{}
-	useGitignore := false
-	header := "No Scan Dir But Manual File Test:"
-	marker := "---"
-	scanDirs := []string{nonExistentDir}
-	noScan := false
-
-	output, includedFiles, _, errorFiles, totalSize, err := generateConcatenatedCode(
-		cwdDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
-	)
-
-	assertions.Error(err)
-	assertions.True(errors.Is(err, fs.ErrNotExist))
-	assertions.Contains(output, marker+" manual.txt")
-	assertions.Len(includedFiles, 1)
-	if len(includedFiles) == 1 {
-		assertions.Equal("manual.txt", includedFiles[0].Path)
-		assertions.True(includedFiles[0].IsManual)
-	}
-	relNonExistent, _ := filepath.Rel(cwdDir, nonExistentDir)
-	relNonExistent = filepath.ToSlash(relNonExistent) + "/"
-	_, exists := errorFiles[relNonExistent]
-	assertions.True(exists)
-	assertions.Greater(totalSize, int64(0))
-	logOutput := logBuf.String()
-	t.Logf("Log output:\n%s", logOutput)
-	assertions.Contains(logOutput, "Target scan directory does not exist.")
-	assertions.Contains(logOutput, "File scan finished with errors.")
-}
-
-// Test non-existent manual file
-func TestGenerateConcatenatedCode_NonExistentManualFile(t *testing.T) {
-	assertions := assert.New(t)
-	cwdDir := t.TempDir()
-	errWrite := os.WriteFile(filepath.Join(cwdDir, "file1.txt"), []byte("Content"), 0644)
-	require.NoError(t, errWrite)
-	testLogger, logBuf := setupTestLogger(t)
-	slog.SetDefault(testLogger)
-	nonExistentManualPath := "nosuchfile.txt"
-	existingManualPath := "file1.txt"
-	exts := processExtensions([]string{"txt"})
-	manualFiles := []string{existingManualPath, nonExistentManualPath}
-	excludeBasenames := []string{}
-	projectExcludes := []string{}
-	flagExcludes := []string{}
-	useGitignore := false
-	header := "Non-Existent Manual File Test:"
-	marker := "---"
-	scanDirs := []string{cwdDir}
-	noScan := false
-
-	output, includedFiles, _, errorFiles, _, err := generateConcatenatedCode(
-		cwdDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
-	)
-
-	assertions.NoError(err)
-	assertions.Contains(output, marker+" file1.txt")
-	assertions.NotContains(output, "nosuchfile.txt")
-	assertions.Len(errorFiles, 1)
-	errManual, exists := errorFiles[nonExistentManualPath]
-	assertions.True(exists)
-	if exists {
-		assertions.ErrorIs(errManual, fs.ErrNotExist)
-	}
-	expectedPaths := []string{"file1.txt"}
-	actualPaths := getPathsFromIncludedFiles(includedFiles)
-	assertions.Equal(expectedPaths, actualPaths)
-	logOutput := logBuf.String()
-	t.Logf("Log output:\n%s", logOutput)
-	assertions.Contains(logOutput, "Manual file not found.", "path=nosuchfile.txt")
 }
 
 // Test invalid exclude pattern
@@ -517,7 +442,7 @@ func TestGenerateConcatenatedCode_InvalidExcludePattern(t *testing.T) {
 
 	output, includedFiles, _, _, _, err := generateConcatenatedCode(
 		tempDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err)
@@ -556,7 +481,7 @@ func TestGenerateConcatenatedCode_NoScan(t *testing.T) {
 
 	output, includedFiles, _, _, _, err := generateConcatenatedCode(
 		cwdDir, scanDirs, exts, manualFiles, excludeBasenames,
-		projectExcludes, flagExcludes, useGitignore, header, marker, noScan,
+		projectExcludes, flagExcludes, useGitignore, header, marker, noScan, true, false,
 	)
 
 	assertions.NoError(err)

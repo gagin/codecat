@@ -15,7 +15,30 @@ and this project adheres to `Semantic Versioning <https://semver.org/spec/v2.0.0
 .. _0.3.0: https://github.com/gagin/codecat/releases/tag/v0.3.0
 .. Note: Links for 0.2.x and 0.1.0 removed as prior tags do not exist for comparison.
 
-`Unreleased`_
+`0.5.0`_ - 2025-07-23
+-------------
+
+Added
++++++
+
+*   **Legacy Output Flag:** Added a ``--legacy-format`` flag to explicitly use the original `---` separator output format.
+*   **XML Escaping Flag:** Added an ``--xml-escape-content`` flag to enable traditional XML entity escaping (e.g., ``<``, ``>``). By default, content is now wrapped in CDATA sections.
+
+Changed
++++++++
+
+*   **BREAKING CHANGE: Default Output is now XML:** The default output format has been changed to XML for more reliable parsing by LLMs and other tools.
+    *   File content is wrapped in ``<![CDATA[...]]>`` sections by default to handle special characters without modification.
+    *   To get the original behavior, use the new ``--legacy-format`` flag.
+*   **Improved Error Reporting:** On any failure, `codecat` now prints a dedicated, clean error summary as the final output instead of the standard success summary.
+*   **Code Refactoring:** Moved pre-flight validation logic from `main.go` into a new `preflight.go` file to improve code organization.
+
+Fixed
++++++
+
+*   The tool will no longer create an empty output file if pre-flight checks fail (e.g., if a file specified with ``-f`` is not found)
+
+`0.4.3`_
 -------------
 
 Added

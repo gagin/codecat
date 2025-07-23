@@ -16,19 +16,21 @@ import (
 	pflag "github.com/spf13/pflag"
 )
 
-const Version = "0.4.2" // Incremented version for log level default change
+const Version = "0.5.0" // Incremented version for log level default change
 
 var (
-	targetDirFlagValues []string
-	extensions          []string
-	manualFiles         []string
-	excludePatterns     []string
-	noGitignore         bool
-	logLevelStr         string // Flag variable
-	outputFile          string
-	configFileFlag      string
-	versionFlag         bool
-	noScanFlag          bool
+	targetDirFlagValues  []string
+	extensions           []string
+	manualFiles          []string
+	excludePatterns      []string
+	noGitignore          bool
+	logLevelStr          string // Flag variable
+	outputFile           string
+	configFileFlag       string
+	versionFlag          bool
+	noScanFlag           bool
+	legacyFormatFlag     bool
+	xmlEscapeContentFlag bool
 )
 
 func init() {
@@ -42,7 +44,6 @@ func init() {
 		"CWD-relative path glob patterns to exclude (adds to .codecat_exclude, comma-separated).")
 	pflag.BoolVar(&noGitignore, "no-gitignore", false,
 		"Disable .gitignore processing.")
-	// Default log level changed to WARN
 	pflag.StringVar(&logLevelStr, "loglevel", "warn",
 		"Log level (debug, info, warn, error).")
 	pflag.StringVarP(&outputFile, "output", "o", "",
@@ -53,13 +54,17 @@ func init() {
 		"Print version and exit.")
 	pflag.BoolVarP(&noScanFlag, "no-scan", "n", false,
 		"Skip directory scanning. Requires -f flag.")
+	pflag.BoolVar(&legacyFormatFlag, "legacy-format", false,
+		"Use legacy '---' separator format instead of the default XML format.")
+	pflag.BoolVar(&xmlEscapeContentFlag, "xml-escape-content", false,
+		"Escape content for XML format (e.g. '<'). Default is to use CDATA sections.")
 
 	pflag.Usage = func() {
-		// Usage string formatting remains the same
 		fmt.Fprintf(os.Stderr, `Usage: %s [target_directory] [flags]
    or: %s [flags]
 
 Concatenate source code files relative to the Current Working Directory (CWD).
+The default output is an XML format with file content wrapped in CDATA sections.
 
 Modes:
 1. Positional Argument: 'codecat <dir>' implies scanning ONLY <dir>. Cannot be used with -d.
@@ -118,7 +123,6 @@ func loadProjectExcludes(cwd string) []string {
 	}
 	defer file.Close()
 
-	// Log at INFO level as it's a significant action if the file exists
 	slog.Info("Loading project-specific excludes.", "path", excludeFilePath)
 	scanner := bufio.NewScanner(file)
 	lineNumber := 0
@@ -156,11 +160,10 @@ func main() {
 
 	// --- Setup Logging ---
 	var logLevel slog.Level
-	// Update the default level in the error message
 	if err := logLevel.UnmarshalText([]byte(logLevelStr)); err != nil {
 		slog.Error("Invalid log level specified, using 'warn'.",
 			"input", logLevelStr, "error", err)
-		logLevel = slog.LevelWarn // Default to WARN if parsing fails
+		logLevel = slog.LevelWarn
 	}
 	logOpts := &slog.HandlerOptions{Level: logLevel, AddSource: logLevel <= slog.LevelDebug}
 	logOutput := os.Stderr
@@ -287,33 +290,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- Generate Output ---
-	// Log start at INFO level as it's a key operation beginning
-	slog.Info("Starting code concatenation process.")
-	concatenatedOutput, includedFiles, emptyFiles, errorFiles, totalSize, genErr := generateConcatenatedCode(
-		cwd,
-		scanDirs,
-		finalExtensionsSet,
-		finalManualFiles,
-		basenameExcludes,
-		projectExcludes,
-		finalFlagExcludes,
-		finalUseGitignore,
-		headerText, commentMarker,
-		finalNoScan,
-	)
-
-	// --- Error Handling After Generation ---
+	// --- Prepare for processing ---
+	var concatenatedOutput string
+	var includedFiles []FileInfo
+	var emptyFiles []string
+	var errorFiles map[string]error
+	var totalSize int64
+	var genErr error
 	exitCode := 0
-	if genErr != nil {
-		// generateConcatenatedCode logs specifics
-		slog.Error("Error(s) reported during file processing.", "error", genErr)
+
+	// --- Pre-flight Checks ---
+	preflightErr := preflightChecks(scanDirs, finalManualFiles, cwd)
+	if preflightErr != nil {
+		slog.Error("Pre-flight validation failed, aborting processing.", "error", preflightErr)
+		genErr = preflightErr
 		exitCode = 1
-	}
-	if len(errorFiles) > 0 && exitCode == 0 {
-		exitCode = 1
-		// Log at WARN level as processing finished but with issues
-		slog.Warn("Individual file errors were encountered during processing.")
+	} else {
+		slog.Debug("Pre-flight checks passed.")
+		// --- Generate Output ---
+		slog.Info("Starting code concatenation process.")
+		concatenatedOutput, includedFiles, emptyFiles, errorFiles, totalSize, genErr = generateConcatenatedCode(
+			cwd,
+			scanDirs,
+			finalExtensionsSet,
+			finalManualFiles,
+			basenameExcludes,
+			projectExcludes,
+			finalFlagExcludes,
+			finalUseGitignore,
+			headerText, commentMarker,
+			finalNoScan,
+			legacyFormatFlag,
+			xmlEscapeContentFlag,
+		)
+
+		// --- Error Handling After Generation ---
+		if genErr != nil {
+			slog.Error("Error(s) reported during file processing.", "error", genErr)
+			exitCode = 1
+		}
+		if len(errorFiles) > 0 && exitCode == 0 {
+			exitCode = 1
+			slog.Warn("Individual file errors were encountered during processing.")
+		}
 	}
 
 	// --- Determine Output Target ---
@@ -321,30 +340,32 @@ func main() {
 	var summaryWriter io.Writer = logOutput
 	var outputFileHandle *os.File
 	if outputFile != "" {
-		var errCreate error
-		outputFileHandle, errCreate = os.Create(outputFile)
-		if errCreate != nil {
-			slog.Error("Failed to create output file, writing to stdout instead.",
-				"path", outputFile, "error", errCreate)
-			fmt.Fprintf(os.Stderr, "Error creating output file '%s': %v\n", outputFile, errCreate)
-			fmt.Fprintln(os.Stderr, "Writing code output to standard output.")
-			codeWriter = os.Stdout
-			if exitCode == 0 {
-				exitCode = 1
+		if exitCode == 0 || preflightErr == nil {
+			var errCreate error
+			outputFileHandle, errCreate = os.Create(outputFile)
+			if errCreate != nil {
+				slog.Error("Failed to create output file, writing to stdout instead.",
+					"path", outputFile, "error", errCreate)
+				fmt.Fprintf(os.Stderr, "Error creating output file '%s': %v\n", outputFile, errCreate)
+				fmt.Fprintln(os.Stderr, "Writing code output to standard output.")
+				codeWriter = os.Stdout
+				if exitCode == 0 {
+					exitCode = 1
+				}
+			} else {
+				codeWriter = outputFileHandle
+				slog.Info("Writing concatenated code to file.", "path", outputFile)
 			}
 		} else {
-			codeWriter = outputFileHandle
-			// Log at INFO level as it's a key successful action
-			slog.Info("Writing concatenated code to file.", "path", outputFile)
+			slog.Warn("Skipping output file creation due to pre-flight errors.")
 		}
 	} else {
 		codeWriter = os.Stdout
-		// Log at INFO level as it's a key successful action
 		slog.Info("Writing concatenated code to stdout.")
 	}
 
 	// --- Write Concatenated Code ---
-	if concatenatedOutput != "" {
+	if concatenatedOutput != "" && codeWriter != nil {
 		_, errWrite := io.WriteString(codeWriter, concatenatedOutput)
 		if errWrite != nil {
 			slog.Error("Failed to write concatenated code output.", "error", errWrite)
@@ -354,7 +375,6 @@ func main() {
 			}
 		}
 	} else if exitCode == 0 && len(includedFiles) == 0 {
-		// Log at WARN level as it's potentially unexpected but not an error
 		slog.Warn("No content generated. Output is empty.")
 	}
 
@@ -368,12 +388,15 @@ func main() {
 		}
 	}
 
-	// --- Print Summary ---
-	printSummaryTree(includedFiles, emptyFiles, errorFiles, totalSize, cwd, summaryWriter)
+	// --- Print Summary or Errors ---
+	if exitCode != 0 {
+		printErrorSummary(summaryWriter, genErr, errorFiles)
+	} else {
+		printSummaryTree(includedFiles, emptyFiles, errorFiles, totalSize, cwd, summaryWriter)
+	}
 
 	endTime := time.Now()
 	duration := endTime.Sub(startTime)
-	// Log at INFO level as it's the final status
 	slog.Info("Execution finished.", "duration", duration.String())
 
 	os.Exit(exitCode)

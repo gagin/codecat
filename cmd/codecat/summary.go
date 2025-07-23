@@ -1,4 +1,3 @@
-// cmd/codecat/summary.go
 package main
 
 import (
@@ -165,4 +164,30 @@ func printSummaryTree(
 		func(path string, err error) string { return err.Error() })
 
 	fmt.Fprintln(outputWriter, "---------------")
+}
+
+// printErrorSummary prints a concise summary of only the errors that occurred.
+func printErrorSummary(writer io.Writer, generalErr error, fileErrors map[string]error) {
+	fmt.Fprintln(writer, "\n--- Errors Encountered ---")
+
+	// Print general/fatal errors first
+	if generalErr != nil {
+		// The error from preflightChecks is already well-formatted.
+		fmt.Fprintf(writer, "%v\n", generalErr)
+	}
+
+	// Then print specific file errors
+	if len(fileErrors) > 0 {
+		paths := make([]string, 0, len(fileErrors))
+		for path := range fileErrors {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+
+		for _, path := range paths {
+			fmt.Fprintf(writer, "- %s: %v\n", path, fileErrors[path])
+		}
+	}
+
+	fmt.Fprintln(writer, "---------------")
 }
