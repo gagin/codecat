@@ -17,7 +17,7 @@ import (
 	pflag "github.com/spf13/pflag"
 )
 
-const Version = "0.5.0" // Incremented version for log level default change
+var Version = "0.5.0" // Incremented version for log level default change
 
 var (
 	targetDirFlagValues  []string
