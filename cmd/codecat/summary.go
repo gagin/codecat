@@ -129,7 +129,8 @@ func printSummaryListSection[K comparable, V any](
 	}
 }
 
-// printSummaryTree remains the same
+// --- START: MODIFICATION ---
+// Updated function signature to accept the new list of excluded files
 func printSummaryTree(
 	includedFiles []FileInfo,
 	emptyFiles []string,
@@ -137,7 +138,9 @@ func printSummaryTree(
 	totalSize int64,
 	cwd string,
 	outputWriter io.Writer,
+	allExcludedFiles []string, // New argument
 ) {
+	// --- END: MODIFICATION ---
 	fmt.Fprintln(outputWriter, "\n--- Summary ---")
 
 	if len(includedFiles) > 0 {
@@ -162,6 +165,18 @@ func printSummaryTree(
 	printSummaryListSection(outputWriter, "\nErrors encountered (%d):\n",
 		errorFiles, func(path string) string { return path },
 		func(path string, err error) string { return err.Error() })
+
+	// --- START: MODIFICATION ---
+	// Add the new section to display all excluded files (only in debug mode)
+	if len(allExcludedFiles) > 0 {
+		excludedMap := make(map[string]struct{}, len(allExcludedFiles))
+		for _, path := range allExcludedFiles {
+			excludedMap[path] = struct{}{}
+		}
+		printSummaryListSection(outputWriter, "\nFiles Excluded by Rules (%d):\n",
+			excludedMap, func(path string) string { return path }, nil)
+	}
+	// --- END: MODIFICATION ---
 
 	fmt.Fprintln(outputWriter, "---------------")
 }

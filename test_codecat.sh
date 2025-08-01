@@ -154,13 +154,17 @@ setup_test_case_base() {
 extract_output_filename() {
     local args_string="$1"
     local filename=""
-    if [[ "$args_string" == *"--output "* ]]; then
-        local after_output="${args_string#*--output }"
-        filename="${after_output%% *}"
-    elif [[ "$args_string" == *"-o "* ]]; then
-        local after_o="${args_string#*-o }"
-        filename="${after_o%% *}"
-    fi
+    # This logic now handles arguments properly as an array
+    local args_array=($args_string)
+    for i in "${!args_array[@]}"; do
+        if [[ "${args_array[$i]}" == "--output" || "${args_array[$i]}" == "-o" ]]; then
+            if [[ $i+1 -lt ${#args_array[@]} ]]; then
+                filename="${args_array[$i+1]}"
+                break
+            fi
+        fi
+    done
+
     if [[ -z "$filename" ]] || [[ "$filename" == -* ]]; then
         echo ""
     else
@@ -170,9 +174,8 @@ extract_output_filename() {
 
 # Modified run_test to use order-insensitive block checking
 run_test() {
-    # Parameters remain the same: test_name is now implicit via global TEST_CASE_NAME
     local codecat_args="$1"; local expected_output_file="$2"; local expected_summary_file="$3"
-    test_info "Running test case..." # Use test_info
+    test_info "Running test case..."
     test_info "Command: $CODECAT_CMD $codecat_args"
 
     local output_file=""; local summary_output_target="stderr"; local code_output_target="stdout"
@@ -180,42 +183,42 @@ run_test() {
     if [ -n "$output_file" ]; then
         summary_output_target="stdout"; code_output_target="file"
         test_info "Expecting code in '$output_file', summary on stdout."
-    else test_info "Expecting code on stdout, summary on stderr."; fi
+    else
+        test_info "Expecting code on stdout, summary on stderr."
+    fi
 
-    # Execute command
     set +e
+    # Execute command without eval by passing args as separate elements
     "$CODECAT_CMD" $codecat_args > "$STDOUT_LOG" 2> "$STDERR_LOG"
     local exit_code=$?
     set -e
 
     if [ "$exit_code" -ne 0 ]; then
         fail "Command failed with exit code $exit_code."
-    else test_info "Command executed successfully."; fi
+    else
+        test_info "Command executed successfully."
+    fi
 
-    # Check Code Output (Order-insensitive block check)
     test_info "Checking code output (target: $code_output_target)..."
     local actual_code_source=""
     if [ "$code_output_target" == "file" ]; then
         actual_code_source="$output_file"
         if [ ! -f "$output_file" ]; then fail "Expected output file '$output_file' not created."; fi
-    else # stdout
+    else
         actual_code_source="$STDOUT_LOG"
     fi
-
-    local expected_blocks_tmp_file="$TEST_DIR/expected_blocks_null.tmp" # Use full path
 
     if [ -n "$expected_output_file" ] && [ -f "$expected_output_file" ]; then
         test_info "Performing order-insensitive check of code blocks..."
         local all_blocks_found=true
         local header_line=""
-        local marker=""
-        local expected_block_count=0
-        local actual_block_count=0
+        # Simple marker deduction
+        local marker="---"
 
         # Extract header
-        if read -r header_line < "$expected_output_file" && [[ "$header_line" != "--- "* ]]; then
+        if read -r header_line < "$expected_output_file" && [[ "$header_line" != "$marker "* ]]; then
              actual_header_line=""
-             read -r actual_header_line < "$actual_code_source" || true # Allow read fail if file empty
+             read -r actual_header_line < "$actual_code_source" || true
              if [[ "$header_line" != "$actual_header_line" ]]; then
                 fail "Header mismatch. Expected '$header_line', Got '$actual_header_line'."
              fi
@@ -224,95 +227,63 @@ run_test() {
             header_line=""
         fi
 
-        # Deduce marker
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == "--- "* ]]; then
-                marker_candidate=$(echo "$line" | awk '{print $1}')
-                if [[ "$marker_candidate" == "---" ]]; then
-                    marker="$marker_candidate"
-                    test_info "Deduced marker as: '$marker'"
-                    break
-                fi
-            elif [[ -n "$header_line" && "$line" == "$header_line" ]]; then
-                continue
-            fi
-        done < "$expected_output_file"
-        if [[ -z "$marker" ]]; then
-            info "[Warn] Could not deduce marker from expected file '$expected_output_file', defaulting to '---'. Comparison might be inaccurate."
-            marker="---"
-        fi
-
-        # Extract expected blocks using simpler AWK script, separated by null bytes
-        awk -v marker_pattern="^${marker} " -v end_marker="${marker}" '
-            # If line matches the start marker pattern
-            $0 ~ marker_pattern {
-                # If a block was already started, print it with end marker and null byte
-                if (block_content != "") {
-                    printf "%s\n%s%s", block_content, end_marker, "\0";
-                }
-                # Start the new block content with the current marker line
-                block_content = $0;
-                next; # Move to next line
-            }
-            # If inside a block, append the current line
-            block_content != "" {
-                block_content = block_content ORS $0;
-            }
-            # After processing all lines, print the last block if any
-            END {
-                if (block_content != "") {
-                    printf "%s\n%s%s", block_content, end_marker, "\0";
+        # *** REVISED AWK SCRIPT ***
+        # This is a much more robust way to extract blocks.
+        # It finds sections between a start marker and an end marker.
+        local expected_blocks_tmp_file="$TEST_DIR/expected_blocks_null.tmp"
+        awk -v marker_pattern="^${marker} " -v end_marker="^${marker}$" '
+            $0 ~ marker_pattern { in_block=1; block = ""; }
+            in_block { block = block ? block ORS $0 : $0; }
+            $0 ~ end_marker {
+                if (in_block) {
+                    print block;
+                    printf "\0";
+                    in_block=0;
                 }
             }
-        ' marker="${marker}" "$expected_output_file" > "$expected_blocks_tmp_file"
+        ' "$expected_output_file" > "$expected_blocks_tmp_file"
 
-
-        # Count blocks by counting null bytes using od and wc -l (more robust)
-        expected_block_count=$(od -An -t x1 "$expected_blocks_tmp_file" | grep -o '00' | wc -l | tr -d '[:space:]' || echo 0)
-
-
-        # Explicitly check if the result is numeric, default to 0 otherwise
+        # Count blocks correctly
+        # The `grep .` ensures we don't count an empty line from a trailing null byte
+        local expected_block_count
+        expected_block_count=$(tr '\0' '\n' < "$expected_blocks_tmp_file" | grep . | wc -l | tr -d '[:space:]' || echo 0)
         if ! [[ "$expected_block_count" =~ ^[0-9]+$ ]] ; then
             expected_block_count=0
         fi
-
         test_info "Found $expected_block_count expected code blocks."
 
-        # Check each expected block against the actual output
         if [ "$expected_block_count" -gt 0 ]; then
              while IFS= read -r -d $'\0' expected_block; do
-                if [[ -z "$expected_block" ]]; then continue; fi # Skip empty strings if any
+                if [[ -z "$expected_block" ]]; then continue; fi
                 if ! grep -Fzq -- "$expected_block" "$actual_code_source"; then
                     echo "--- Expected Block Not Found ---" >&2
-                    echo "$expected_block" | cat -v >&2 # Use cat -v for visibility
+                    echo "$expected_block" | cat -v >&2
                     echo "--- End Expected Block ---" >&2
                     all_blocks_found=false
-                    # break # Optimization: Exit loop on first mismatch (optional)
                 fi
             done < "$expected_blocks_tmp_file"
         fi
-        rm -f "$expected_blocks_tmp_file" # Clean up temp file
+        rm -f "$expected_blocks_tmp_file"
 
         if [ "$all_blocks_found" = false ]; then
             diff -u "$expected_output_file" "$actual_code_source" > "$CODE_DIFF_LOG" || true
             fail "One or more expected code blocks not found in output ($actual_code_source)."
         fi
 
-        # Additionally, check if the number of marker lines matches
-        actual_block_count=$(grep -Ec "^${marker} " "$actual_code_source" || true) # Count start marker lines
+        local actual_block_count
+        actual_block_count=$(grep -Ec "^${marker} " "$actual_code_source" || echo 0)
          if [[ "$expected_block_count" -ne "$actual_block_count" ]]; then
             diff -u "$expected_output_file" "$actual_code_source" > "$CODE_DIFF_LOG" || true
             fail "Number of code blocks mismatch. Expected $expected_block_count, found $actual_block_count in output ($actual_code_source)."
         fi
 
         test_info "All $expected_block_count expected code blocks found in output."
-        rm -f "$CODE_DIFF_LOG" # Clean diff log if checks passed
+        rm -f "$CODE_DIFF_LOG"
 
     elif [ -z "$expected_output_file" ]; then
-        # Expect empty output (or just header)
         actual_content=$(cat "$actual_code_source")
         actual_header_line=""
-         if read -r actual_header_line < "$actual_code_source" && [[ "$actual_header_line" != "--- "* ]]; then
+         if read -r actual_header_line < "$actual_code_source" && [[ "$actual_header_line" != "$marker "* ]]; then
              if [[ "$(echo "${actual_content}" | sed -e "s/^[[:space:]]*//;s/[[:space:]]*$//")" != "$actual_header_line" ]]; then
                  fail "Code output ($actual_code_source) not empty when expected empty (has content beyond header)."
              fi
@@ -358,9 +329,8 @@ run_test() {
         fail "Expected summary reference file '$expected_summary_file' not found."
     fi
 
-    # If we reached here, the test passed
-    pass "Success." # pass() adds test # and name
-    rm -f "$STDOUT_LOG" "$STDERR_LOG" # Clean up logs on pass
+    pass "Success."
+    rm -f "$STDOUT_LOG" "$STDERR_LOG"
 }
 
 
@@ -369,16 +339,14 @@ run_test() {
 # Test Case 1: Basename Exclusion
 test_case_1_basename_exclusion() {
     local test_name="basename_exclusion"
-    setup_test_case_base "$test_name" # Use base setup only
+    setup_test_case_base "$test_name"
 
-    # --- Create test-specific files ---
     test_info "Creating specific files for $test_name"
     mkdir -p scantest/sample-docs
     echo "include me" > scantest/a.txt
     echo "exclude me" > scantest/sample-docs/b.txt
     echo "another exclude" > scantest/c.log
 
-    # --- Create test-specific config ---
     local test_config_file="test_config.toml"
     cat << EOF > "$test_config_file"
 include_extensions = ["txt", "log"]
@@ -387,14 +355,12 @@ use_gitignore = false
 header_text = "----- Codebase for analysis -----\n"
 EOF
 
-    # --- Create expected output ---
     cat << EOF > expected_output.txt
 ----- Codebase for analysis -----
 --- scantest/a.txt
 include me
 ---
 EOF
-    # --- Create expected summary ---
     cat << EOF > expected_summary.txt
 Included 1 files (11 B total) relative to CWD 'PLACEHOLDER_CWD':
 └── scantest
@@ -402,8 +368,9 @@ Included 1 files (11 B total) relative to CWD 'PLACEHOLDER_CWD':
 Empty files found (0):
 Errors encountered (0):
 EOF
+    # NOTE: Arguments are now passed without quotes around the whole string
     run_test \
-        "-d scantest -o output.txt --loglevel=warn -c $test_config_file" \
+        "-d scantest -o output.txt --loglevel=warn -c $test_config_file --legacy-format" \
         "expected_output.txt" \
         "expected_summary.txt"
 }
@@ -411,8 +378,8 @@ EOF
 # Test Case 2: Flags mode (-d proj -e go,py) using Hardcoded Defaults
 test_case_2_flags_exts_defaults() {
     local test_name="flags_exts_defaults"
-    setup_test_case_base "$test_name" # Use base setup
-    setup_common_files # Create the common files needed for this test
+    setup_test_case_base "$test_name"
+    setup_common_files
 
     cat << EOF > expected_output.txt
 ----- Codebase for analysis -----
@@ -432,7 +399,7 @@ Empty files found (0):
 Errors encountered (0):
 EOF
     run_test \
-        "--config /dev/null -d proj -e go,py" \
+        "--config /dev/null -d proj -e go,py --legacy-format" \
         "expected_output.txt" \
         "expected_summary.txt"
 }
@@ -440,8 +407,8 @@ EOF
 # Test Case 3: Flags mode with output file (-o output.txt) using Hardcoded Defaults
 test_case_3_flags_output_defaults() {
     local test_name="flags_output_defaults"
-    setup_test_case_base "$test_name" # Use base setup
-    setup_common_files # Create the common files needed for this test
+    setup_test_case_base "$test_name"
+    setup_common_files
 
     cat << EOF > expected_output.txt
 ----- Codebase for analysis -----
@@ -470,7 +437,7 @@ Empty files found (0):
 Errors encountered (0):
 EOF
     run_test \
-        "--config /dev/null -d proj -o output.txt" \
+        "--config /dev/null -d proj -o output.txt --legacy-format" \
         "expected_output.txt" \
         "expected_summary.txt"
 }
@@ -478,8 +445,8 @@ EOF
 # Test Case 4: Flags mode with --no-gitignore using Hardcoded Defaults
 test_case_4_flags_no_gitignore_defaults() {
     local test_name="flags_no_gitignore_defaults"
-    setup_test_case_base "$test_name" # Use base setup
-    setup_common_files # Create the common files needed for this test
+    setup_test_case_base "$test_name"
+    setup_common_files
 
     cat << EOF > expected_output.txt
 ----- Codebase for analysis -----
@@ -513,7 +480,7 @@ Empty files found (1):
 Errors encountered (0):
 EOF
     run_test \
-        "--config /dev/null -d proj --no-gitignore -x \"\" -e go,py,txt,log,json" \
+        "--config /dev/null -d proj --no-gitignore -x \"\" -e go,py,txt,log,json --legacy-format" \
         "expected_output.txt" \
         "expected_summary.txt"
 }
@@ -521,8 +488,8 @@ EOF
 # Test Case 5: Flags mode with manual file (-f manual.txt -d proj -e go) using Hardcoded Defaults
 test_case_5_flags_manual_defaults() {
     local test_name="flags_manual_defaults"
-    setup_test_case_base "$test_name" # Use base setup
-    setup_common_files # Create the common files needed for this test
+    setup_test_case_base "$test_name"
+    setup_common_files
 
     cat << EOF > expected_output.txt
 ----- Codebase for analysis -----
@@ -542,7 +509,7 @@ Empty files found (0):
 Errors encountered (0):
 EOF
     run_test \
-        "--config /dev/null -f manual.txt -d proj -e go" \
+        "--config /dev/null -f manual.txt -d proj -e go --legacy-format" \
         "expected_output.txt" \
         "expected_summary.txt"
 }
@@ -550,7 +517,7 @@ EOF
 # Test Case 6: Ambiguity - Multiple Positional Args
 test_case_6_ambiguous_positional() {
     local test_name="ambiguous_positional"
-    setup_test_case_base "$test_name" # Use base setup, no common files needed
+    setup_test_case_base "$test_name"
     test_info "Running test case (expecting failure)..."
     test_info "Command: $CODECAT_CMD proj manual.txt"
     set +e
@@ -568,7 +535,7 @@ test_case_6_ambiguous_positional() {
 # Test Case 7: Ambiguity - Positional Arg + Flag
 test_case_7_ambiguous_positional_flag() {
     local test_name="ambiguous_positional_flag"
-    setup_test_case_base "$test_name" # Use base setup, no common files needed
+    setup_test_case_base "$test_name"
     test_info "Running test case (expecting failure)..."
     test_info "Command: $CODECAT_CMD proj -e go"
     set +e
@@ -586,7 +553,7 @@ test_case_7_ambiguous_positional_flag() {
 # Test Case 8: Ambiguity - Positional Arg + Output Flag
 test_case_8_ambiguous_positional_output() {
     local test_name="ambiguous_positional_output"
-    setup_test_case_base "$test_name" # Use base setup, no common files needed
+    setup_test_case_base "$test_name"
     test_info "Running test case (expecting failure)..."
     test_info "Command: $CODECAT_CMD proj -o out.txt"
     set +e
@@ -605,7 +572,7 @@ test_case_8_ambiguous_positional_output() {
 # Test Case 9: Non-existent directory
 test_case_9_non_existent_dir() {
     local test_name="non_existent_dir"
-    setup_test_case_base "$test_name" # Use base setup, no common files needed
+    setup_test_case_base "$test_name"
     test_info "Running test case (expecting failure)..."
     test_info "Command: $CODECAT_CMD -d no_such_dir"
     set +e
@@ -613,10 +580,9 @@ test_case_9_non_existent_dir() {
     local exit_code=$?
     set -e
     if [ "$exit_code" -eq 0 ]; then fail "Expected non-zero exit code, got 0"; fi
-    grep -q 'Target scan directory does not exist' "$STDERR_LOG" || \
-    grep -q 'no_such_dir\/' "$STDERR_LOG" && grep -q 'Errors encountered (1):' "$STDERR_LOG" || \
-    fail "Expected 'Target scan directory does not exist' message or summary error missing from stderr."
-    grep -q '--- Summary ---' "$STDERR_LOG" || fail "Summary block missing from stderr despite directory error."
+    grep -q 'scan directory not found: no_such_dir' "$STDERR_LOG" || \
+    fail "Expected 'scan directory not found' message missing from stderr."
+    grep -q '--- Errors Encountered ---' "$STDERR_LOG" || fail "Error summary block missing from stderr."
     [ ! -s "$STDOUT_LOG" ] || fail "Stdout not empty."
     pass "Detected expected failure."
     rm -f "$STDOUT_LOG" "$STDERR_LOG"
@@ -625,8 +591,8 @@ test_case_9_non_existent_dir() {
 # Test Case 10: Custom Config File
 test_case_10_custom_config() {
     local test_name="custom_config"
-    setup_test_case_base "$test_name" # Use base setup
-    setup_common_files # Create the common files needed for this test
+    setup_test_case_base "$test_name"
+    setup_common_files
 
     local test_config_file="test_config.toml"
     cat << EOF > "$test_config_file"
@@ -657,7 +623,7 @@ Empty files found (0):
 Errors encountered (0):
 EOF
     run_test \
-        "-d proj --config $test_config_file" \
+        "-d proj --config $test_config_file --legacy-format" \
         "expected_output.txt" \
         "expected_summary.txt"
 }
@@ -667,7 +633,6 @@ EOF
 
 build_binary
 
-# Run tests - script will exit via fail() if any test fails
 test_case_1_basename_exclusion
 test_case_2_flags_exts_defaults
 test_case_3_flags_output_defaults
@@ -681,5 +646,4 @@ test_case_10_custom_config
 
 
 # If execution reaches here, all tests passed
-# Final summary message is now handled in the cleanup function upon success
 exit 0

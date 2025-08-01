@@ -3,9 +3,11 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	gocodewalker "github.com/boyter/gocodewalker"
@@ -41,7 +43,7 @@ func generateConcatenatedCode(
 		if header != "" {
 			outputBuilder.WriteString("  <description><![CDATA[")
 			outputBuilder.WriteString(strings.TrimSpace(header))
-			outputBuilder.WriteString("]]></description>\n")
+			outputBuilder.WriteString("]]]]><![CDATA[></description>\n")
 		}
 	} else { // Legacy Mode
 		if header != "" {
@@ -82,12 +84,13 @@ func generateConcatenatedCode(
 	slog.Debug("Using combined CWD-relative exclude patterns", "patterns", cwdRelativeExcludePatterns)
 
 	// --- Process Manually Specified Files (-f) ---
+	// This runs first to mark paths as processed. The -f override happens in the excluder logic.
 	processManualFiles(
 		cwd,
 		manualFilePaths,
 		marker,
 		&outputBuilder,
-		processedAbsPaths,
+		processedAbsPaths, // This is intentionally processed first
 		&includedFiles,
 		&emptyFiles,
 		errorFiles,
@@ -99,14 +102,14 @@ func generateConcatenatedCode(
 	// --- Perform Directory Scan ---
 	shouldScan := !noScan && len(scanDirs) > 0
 	if shouldScan {
-		excluder := NewDefaultExcluder(validBasenameExcludes, cwdRelativeExcludePatterns)
+		// Pass manual file paths to the excluder so it can grant them priority.
+		excluder := NewDefaultExcluder(validBasenameExcludes, cwdRelativeExcludePatterns, manualFilePaths)
 
 		if len(exts) == 0 && len(manualFilePaths) == 0 {
 			slog.Warn("Scanning requested, but no extensions/manual files provided. Scan will find nothing.")
 		}
 		slog.Info("Starting file scan.", "scanDirs", scanDirs, "useGitignore", useGitignore)
 
-		// Pre-flight checks in main() ensure scanDirs are valid directories.
 		fileListQueue := make(chan *gocodewalker.File, 100)
 		fileWalker := gocodewalker.NewFileWalker(cwd, fileListQueue)
 		fileWalker.IgnoreGitIgnore = !useGitignore
@@ -131,6 +134,9 @@ func generateConcatenatedCode(
 
 		for f := range fileListQueue {
 			absPath := f.Location
+			if processedAbsPaths[absPath] {
+				continue
+			}
 
 			isInScanDir := false
 			for _, dir := range scanDirs {
@@ -140,10 +146,6 @@ func generateConcatenatedCode(
 				}
 			}
 			if !isInScanDir {
-				continue
-			}
-
-			if processedAbsPaths[absPath] {
 				continue
 			}
 
@@ -183,18 +185,14 @@ func generateConcatenatedCode(
 			content, errRead := os.ReadFile(absPath)
 			if errRead != nil {
 				errorFiles[relPathCwd] = errRead
-				processedAbsPaths[absPath] = true
-				continue
-			}
-			if len(content) == 0 {
+			} else if len(content) == 0 {
 				emptyFiles = append(emptyFiles, relPathCwd)
-				processedAbsPaths[absPath] = true
-				continue
+			} else {
+				fileSize := fileInfo.Size()
+				appendFileContent(&outputBuilder, marker, relPathCwd, content, useLegacyFormat, xmlEscapeContent)
+				includedFiles = append(includedFiles, FileInfo{Path: relPathCwd, Size: fileSize, IsManual: false})
+				totalSize += fileSize
 			}
-			fileSize := fileInfo.Size()
-			appendFileContent(&outputBuilder, marker, relPathCwd, content, useLegacyFormat, xmlEscapeContent)
-			includedFiles = append(includedFiles, FileInfo{Path: relPathCwd, Size: fileSize, IsManual: false})
-			totalSize += fileSize
 			processedAbsPaths[absPath] = true
 		}
 		<-processingDone
@@ -207,21 +205,43 @@ func generateConcatenatedCode(
 			returnedErr = fmt.Errorf("file walk operation failed for '%s': %w", cwd, finalWalkError)
 		}
 
-		if returnedErr == nil {
-			slog.Info("File scan completed.")
-		} else {
-			slog.Error("File scan finished with errors.", "first_error", returnedErr)
-		}
 	} else if noScan {
 		slog.Info("Skipping directory scan due to --no-scan flag.")
-	} else if len(scanDirs) == 0 {
-		slog.Info("Skipping directory scan as no scan directories were provided or determined.")
 	}
 
-	if !useLegacyFormat { // XML Mode
+	if !useLegacyFormat {
 		outputBuilder.WriteString("</codebase>\n")
 	}
 
 	output = outputBuilder.String()
 	return
+}
+
+func getUnfilteredFileList(cwd string, scanDirs []string) ([]string, error) {
+	allFiles := make(map[string]struct{})
+	for _, dir := range scanDirs {
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				relPath, relErr := filepath.Rel(cwd, path)
+				if relErr != nil {
+					allFiles[filepath.ToSlash(path)] = struct{}{}
+				} else {
+					allFiles[filepath.ToSlash(relPath)] = struct{}{}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error during unfiltered walk of %s: %w", dir, err)
+		}
+	}
+	result := make([]string, 0, len(allFiles))
+	for path := range allFiles {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result, nil
 }

@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"context" // Add this import
 	"errors"
 	"fmt"
 	"io"
@@ -388,11 +389,46 @@ func main() {
 		}
 	}
 
+	// --- START: MODIFICATION ---
+	// Add the post-scan diff logic here, before printing the summary
+	var allExcludedFiles []string
+	if exitCode == 0 && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("Performing post-scan diff to find all excluded files...")
+
+		allFoundFiles, err := getUnfilteredFileList(cwd, scanDirs)
+		if err != nil {
+			slog.Warn("Could not perform post-scan diff.", "error", err)
+		} else {
+			processedFiles := make(map[string]struct{})
+			for _, f := range includedFiles {
+				processedFiles[f.Path] = struct{}{}
+			}
+			for _, f := range emptyFiles {
+				processedFiles[f] = struct{}{}
+			}
+			for f := range errorFiles {
+				processedFiles[f] = struct{}{}
+			}
+			for _, f := range finalManualFiles { // Manually specified files are also "processed"
+				processedFiles[f] = struct{}{}
+			}
+
+			for _, file := range allFoundFiles {
+				if _, isProcessed := processedFiles[file]; !isProcessed {
+					allExcludedFiles = append(allExcludedFiles, file)
+				}
+			}
+			slog.Debug("Post-scan diff complete.", "found_excluded", len(allExcludedFiles))
+		}
+	}
+	// --- END: MODIFICATION ---
+
 	// --- Print Summary or Errors ---
 	if exitCode != 0 {
 		printErrorSummary(summaryWriter, genErr, errorFiles)
 	} else {
-		printSummaryTree(includedFiles, emptyFiles, errorFiles, totalSize, cwd, summaryWriter)
+		// Pass the new list to the summary printer
+		printSummaryTree(includedFiles, emptyFiles, errorFiles, totalSize, cwd, summaryWriter, allExcludedFiles)
 	}
 
 	endTime := time.Now()
